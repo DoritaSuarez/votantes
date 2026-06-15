@@ -478,29 +478,37 @@ def build_data():
             raise ValueError("No se encontró Santa Marta en el GeoJSON")
 
         # Llenar el polígono completo de SM con celdas H3
-        # h3.geo_to_cells acepta directamente la geometría GeoJSON
         _all_hexes = h3.geo_to_cells(_sm_feat["geometry"], _RES)
-        print(f"[h3] {len(_all_hexes)} celdas en polígono SM (res={_RES})")
+        print(f"[h3] {len(_all_hexes)} celdas brutas en polígono SM (res={_RES})")
 
         # KDTree sobre coordenadas de puestos
         _kd = KDTree(list(zip(_gv["latitud"], _gv["longitud"])))
 
+        # Radio máximo por hex: solo se mantienen los que están a ≤ 0.06 grados (~7 km)
+        # del puesto más cercano. Cubre el área urbana de SM (~7 400 hexes, ~4 MB JSON)
+        # y excluye la Sierra Nevada despoblada. Los huecos quedan en zonas sin población.
+        _MAX_DIST = 0.06
+
         _features = []
-        for _i, _hx in enumerate(sorted(_all_hexes)):
+        _hex_idx  = 0
+        for _hx in sorted(_all_hexes):
             _hlat, _hlon = h3.cell_to_latlng(_hx)
 
-            # Puesto más cercano
-            _, _idx = _kd.query([_hlat, _hlon])
+            # Puesto más cercano y su distancia euclídea (grados)
+            _dist, _idx = _kd.query([_hlat, _hlon])
+            if _dist > _MAX_DIST:
+                continue   # fuera del área de influencia de cualquier puesto
+
             _row = _gv.iloc[_idx]
 
-            # Polígono GeoJSON del hexágono (h3 → (lat,lon), GeoJSON → (lon,lat))
+            # Polígono GeoJSON (h3 devuelve (lat,lon) → GeoJSON necesita (lon,lat))
             _bnd  = h3.cell_to_boundary(_hx)
             _ring = [[_lon, _lat] for _lat, _lon in _bnd] + [[_bnd[0][1], _bnd[0][0]]]
 
             _features.append({
                 "type": "Feature",
                 "properties": {
-                    "hex_id":      _i,
+                    "hex_id":      _hex_idx,
                     "PUESNOMBRE":  _row["PUESNOMBRE"],
                     "CANNOMBRE":   _row["CANNOMBRE"],
                     "votos_cand":  int(_row["votos_cand"]),
@@ -509,6 +517,7 @@ def build_data():
                 },
                 "geometry": {"type": "Polygon", "coordinates": [_ring]},
             })
+            _hex_idx += 1
 
         voronoi_geo = {"type": "FeatureCollection", "features": _features}
         voronoi_df  = pd.DataFrame([f["properties"] for f in _features])
