@@ -1,0 +1,180 @@
+/* =========================================================
+   Dashboard Electoral — Responsive styles
+   ========================================================= */
+
+/* ── Fuente base más legible en pantallas pequeñas ──────── */
+body {
+  -webkit-tap-highlight-color: transparent;
+  font-size: 14px;
+}
+
+/* ── Encabezado ─────────────────────────────────────────── */
+.py-2.border-bottom h3 {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Tabs: scroll horizontal en móvil ───────────────────── */
+.dash-tabs-container,
+.tab-container {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.dash-tabs {
+  flex-wrap: nowrap !important;
+  white-space: nowrap;
+}
+
+.dash-tab {
+  flex-shrink: 0;
+  font-size: 0.82rem !important;
+  padding: 6px 10px !important;
+}
+
+/* ── Cards ───────────────────────────────────────────────── */
+.card-header {
+  font-size: 0.82rem;
+  line-height: 1.3;
+}
+
+/* ── Dropdowns con ancho fijo → fluidos en móvil ───────── */
+@media (max-width: 768px) {
+  /* Dropdown inline del candidato vs resto (Magdalena tab) */
+  .card-header .float-end {
+    float: none !important;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+    width: 100%;
+  }
+
+  /* Cualquier dropdown con width fijo explícito se hace fluido */
+  .card-header .float-end .Select,
+  .card-header .float-end > div {
+    width: 100% !important;
+    min-width: unset !important;
+  }
+
+  /* Dropdown del mapa H3 en tab mesa */
+  #drop-mesa-cand-h3 {
+    min-width: unset !important;
+    width: 100% !important;
+  }
+}
+
+/* ── Columnas: stack vertical en pantallas pequeñas ─────── */
+@media (max-width: 768px) {
+  /* Columnas de contenido principal (no KPI cols de width≤3) */
+  .col-4, .col-5, .col-6, .col-7, .col-8, .col-9 {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 0 0 100% !important;
+  }
+
+  /* Columnas de radio y filtros que van inline en desktop */
+  .col-3.col-radio-mapa,
+  #col-radio-mapa {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 0 0 100% !important;
+    margin-top: 8px;
+  }
+}
+
+/* ── KPI cards: 2 por fila en móvil, 4 en desktop ───────── */
+@media (max-width: 576px) {
+  /* KPI cols de width=2 → 50% en móvil */
+  .col-2 {
+    width: 50% !important;
+    max-width: 50% !important;
+    flex: 0 0 50% !important;
+  }
+
+  /* KPI cards inline de tab_mesa (width=4/5/3 dentro de un col-6) */
+  .col-4, .col-5, .col-3 {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 0 0 100% !important;
+  }
+
+  .card-body {
+    padding: 0.5rem !important;
+  }
+
+  .card-header {
+    font-size: 0.75rem;
+    padding: 0.35rem 0.6rem;
+  }
+
+  h4.fw-bold {
+    font-size: 1rem !important;
+  }
+
+  h5.fw-bold, h6.fw-bold {
+    font-size: 0.88rem !important;
+  }
+}
+
+/* ── Slider de Top N (Magdalena tab) ────────────────────── */
+@media (max-width: 576px) {
+  .rc-slider {
+    width: 100%;
+  }
+}
+
+/* ── Tablas: scroll horizontal ───────────────────────────── */
+.dash-table-container .dash-spreadsheet-container {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Dropdowns de selector mesa ─────────────────────────── */
+@media (max-width: 576px) {
+  #drop-mesa {
+    font-size: 0.8rem;
+  }
+
+  /* Encabezado principal más compacto */
+  .py-2.border-bottom .col-9 h3 {
+    font-size: 1rem !important;
+  }
+
+  .py-2.border-bottom small {
+    font-size: 0.68rem;
+  }
+
+  #btn-export {
+    font-size: 0.68rem;
+    padding: 2px 5px;
+  }
+}
+
+/* ── Gráficos Plotly: altura mínima en pantallas tiny ─────── */
+@media (max-width: 576px) {
+  .js-plotly-plot .plotly,
+  .dash-graph {
+    min-height: 250px;
+  }
+}
+
+/* ── Radio items del espectro: wrap en móvil ──────────────── */
+@media (max-width: 768px) {
+  #radio-espectro .form-check {
+    display: inline-block;
+    margin-bottom: 4px;
+  }
+}
+
+/* ── Dropdown de candidato inline (tab Magdalena, Mapa) ───── */
+@media (max-width: 768px) {
+  #drop-cand-vs-resto {
+    width: 100% !important;
+  }
+
+  #drop-mapa-cand {
+    margin-bottom: 8px;
+  }
+}

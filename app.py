@@ -53,6 +53,38 @@ try:
 except Exception as _e:
     print(f"[app] _pues_abstenc KDTree: {_e}")
 
+# ---------------------------------------------------------------------------
+# Datos "Por mesa": votos_raw filtrado a SM con MESA column
+# ---------------------------------------------------------------------------
+votos_sm = votos_raw[
+    (votos_raw["MUNNOMBRE"] == "SANTA MARTA") &
+    ~votos_raw["CANNOMBRE"].isin({"VOTOS NULOS", "VOTOS NO MARCADOS"})
+].copy()
+votos_sm["ESPECTRO"] = votos_sm["CANNOMBRE"].map(ESPECTRO_MAP).fillna("Otros")
+
+_mesas_uniq = (
+    votos_sm[["PUESNOMBRE", "COMUCODIGO", "MESA"]]
+    .drop_duplicates(subset=["PUESNOMBRE", "MESA"])
+    .sort_values(["PUESNOMBRE", "MESA"])
+    .reset_index(drop=True)
+)
+_OPCIONES_MESA = [
+    {
+        "label": f"{r['PUESNOMBRE'].title()} · Mesa {int(r['MESA'])}",
+        "value": f"{r['PUESNOMBRE']}||{int(r['MESA'])}",
+    }
+    for _, r in _mesas_uniq.iterrows()
+]
+_DEFAULT_MESA = _OPCIONES_MESA[0]["value"] if _OPCIONES_MESA else ""
+
+# Geo lookup por PUESNOMBRE (para centrar el mapa H3 en la mesa seleccionada)
+_pues_geo = (
+    votos_geo_cand.dropna(subset=["latitud", "longitud"])
+    [["PUESNOMBRE", "latitud", "longitud"]]
+    .drop_duplicates("PUESNOMBRE")
+    .set_index("PUESNOMBRE")
+)
+
 TOP5 = kpis["top5"]
 EXCLUIR_STATS = {"VOTOS NULOS", "VOTOS NO MARCADOS"}
 CANDIDATOS_VALIDOS = [c for c in cand["CANNOMBRE"].tolist() if c not in EXCLUIR_STATS]
@@ -1045,6 +1077,228 @@ def fig_candidato_mapa(candidato: str):
 # KPI card helper
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Figuras — Tab Por mesa
+# ---------------------------------------------------------------------------
+
+def _parse_mesa_key(key: str):
+    parts = key.split("||")
+    return parts[0], int(parts[1])
+
+
+def fig_puesto_resumen(puesto: str):
+    """Barra horizontal: votos por candidato en TODO el puesto (todas las mesas)."""
+    df = votos_sm[votos_sm["PUESNOMBRE"] == puesto].copy()
+    if df.empty:
+        return go.Figure()
+    df_agg = df.groupby("CANNOMBRE", as_index=False).agg(votos=("VOTOS", "sum"))
+    total  = df_agg["votos"].sum()
+    df_agg["pct"] = (df_agg["votos"] / total * 100).round(1)
+    df_agg = df_agg.sort_values("votos", ascending=True)
+    colores = [_color(n) for n in df_agg["CANNOMBRE"]]
+    n_mesas = int(df["MESA"].nunique())
+    fig = px.bar(
+        df_agg, y="CANNOMBRE", x="votos", orientation="h",
+        color="CANNOMBRE", color_discrete_sequence=colores,
+        text="pct",
+        labels={"CANNOMBRE": "", "votos": "Votos"},
+    )
+    fig.update_traces(
+        texttemplate="%{text:.1f}%", textposition="outside", textfont=dict(size=10),
+    )
+    fig.update_layout(
+        showlegend=False,
+        margin=dict(l=10, r=60, t=40, b=10), height=380,
+        xaxis_title="Votos",
+        title=dict(
+            text=f"{n_mesas} mesas · {total:,} votos totales",
+            font=dict(size=12), x=0,
+        ),
+        plot_bgcolor="#f8f9fa", paper_bgcolor="#f8f9fa",
+    )
+    return fig
+
+
+def fig_mesa_full_h3(puesto: str, candidato: str):
+    """Mapa H3 en degradado: % del candidato/métrica seleccionado por zona."""
+    if voronoi_geo is None or voronoi_df.empty:
+        return _h3_unavailable(height=500)
+
+    # Centro: coordenadas exactas del edificio (primario),
+    # si no están disponibles → centroide del territorio voronoi (fallback)
+    clat, clon = 11.225, -74.185
+    if puesto in _pues_geo.index:
+        clat = float(_pues_geo.loc[puesto, "latitud"])
+        clon = float(_pues_geo.loc[puesto, "longitud"])
+    else:
+        _mask_pues = voronoi_df["PUESNOMBRE"] == puesto
+        if _mask_pues.any():
+            _ids_pues = set(voronoi_df.loc[_mask_pues, "hex_id"].tolist())
+            _feats_p  = [f for f in voronoi_geo["features"]
+                         if f["properties"]["hex_id"] in _ids_pues]
+            if _feats_p:
+                _vlats, _vlons = [], []
+                for _f in _feats_p:
+                    for _lon_p, _lat_p in _f["geometry"]["coordinates"][0]:
+                        _vlats.append(_lat_p)
+                        _vlons.append(_lon_p)
+                if _vlats:
+                    clat = sum(_vlats) / len(_vlats)
+                    clon = sum(_vlons) / len(_vlons)
+
+    # ── Obtener pct_val y metadatos según la selección ─────────────────────
+    if candidato == "_abstencion_":
+        df = voronoi_df[["hex_id", "PUESNOMBRE"]].copy()
+        df["pct_val"] = df["PUESNOMBRE"].map(_pues_abstenc)
+        color_hex = COLOR_ABSTEN
+        bar_label  = "% Abstención"
+        hover_extra = {}
+    else:
+        cand_agg = (
+            votos_geo_cand[votos_geo_cand["CANNOMBRE"] == candidato]
+            .groupby("PUESNOMBRE", as_index=False)
+            .agg(votos_c=("votos", "sum"), total_puesto=("total_puesto", "sum"))
+        )
+        cand_agg["pct_val"] = (
+            cand_agg["votos_c"] / cand_agg["total_puesto"].replace(0, np.nan) * 100
+        ).round(1)
+        df = voronoi_df[["hex_id", "PUESNOMBRE"]].merge(
+            cand_agg[["PUESNOMBRE", "pct_val", "votos_c"]], on="PUESNOMBRE", how="left"
+        )
+        if candidato == "VOTOS EN BLANCO":
+            color_hex = "#6B7280"
+            bar_label  = "% Voto en Blanco"
+        else:
+            color_hex = _color(candidato)
+            bar_label  = f"% {candidato.split()[0].title()}"
+        hover_extra = {"votos_c": ":,"}
+
+    vmax = float(df["pct_val"].max()) if not df["pct_val"].isna().all() else 100.0
+
+    hover_data = {"pct_val": ":.1f", "hex_id": False, **hover_extra}
+    labels     = {"pct_val": bar_label, "votos_c": "Votos"}
+
+    fig = px.choropleth_mapbox(
+        df, geojson=voronoi_geo, locations="hex_id",
+        featureidkey="properties.hex_id",
+        color="pct_val",
+        color_continuous_scale=[[0, "#f0f4f8"], [1, color_hex]],
+        range_color=[0, vmax],
+        hover_name="PUESNOMBRE",
+        hover_data=hover_data,
+        labels=labels,
+        mapbox_style="carto-positron",
+        zoom=11, center={"lat": clat, "lon": clon},
+        opacity=0.80,
+    )
+    fig.update_traces(marker_line_width=0.4, marker_line_color="rgba(255,255,255,0.6)")
+
+    # Borde verde: hexágonos radio=1 en el centro exacto del puesto
+    if puesto in _pues_geo.index:
+        try:
+            import h3 as _h3b
+            _center_cell = _h3b.latlng_to_cell(clat, clon, 9)
+            _near_cells  = list(_h3b.grid_disk(_center_cell, 1))
+
+            borde_lats, borde_lons = [], []
+            for _cell in _near_cells:
+                _bnd = _h3b.cell_to_boundary(_cell)
+                for _lat_b, _lon_b in _bnd:
+                    borde_lats.append(_lat_b)
+                    borde_lons.append(_lon_b)
+                borde_lats.append(_bnd[0][0])
+                borde_lons.append(_bnd[0][1])
+                borde_lats.append(None)
+                borde_lons.append(None)
+
+            fig.add_trace(go.Scattermapbox(
+                lat=borde_lats, lon=borde_lons,
+                mode="lines",
+                line=dict(color="#15803d", width=3),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+        except Exception:
+            pass
+
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0), height=500,
+        coloraxis_colorbar=dict(title=bar_label, thickness=12),
+    )
+    return fig
+
+
+def fig_mesa_cands(puesto: str, mesa: int):
+    """Barra de candidatos para una mesa específica."""
+    df = votos_sm[(votos_sm["PUESNOMBRE"] == puesto) & (votos_sm["MESA"] == mesa)].copy()
+    if df.empty:
+        return go.Figure()
+    df = df.groupby("CANNOMBRE", as_index=False).agg(votos=("VOTOS", "sum"))
+    total = df["votos"].sum()
+    df["pct"] = (df["votos"] / total * 100).round(1)
+    df = df.sort_values("votos", ascending=False)
+    colores = [_color(n) for n in df["CANNOMBRE"]]
+    fig = px.bar(
+        df, x="CANNOMBRE", y="votos",
+        color="CANNOMBRE", color_discrete_sequence=colores,
+        text="pct",
+        labels={"CANNOMBRE": "", "votos": "Votos"},
+    )
+    fig.update_traces(
+        texttemplate="%{text:.1f}%", textposition="outside", textfont=dict(size=10),
+    )
+    fig.update_layout(
+        showlegend=False, xaxis_tickangle=-35,
+        margin=dict(l=10, r=10, t=10, b=110), height=360,
+        plot_bgcolor="#f8f9fa", paper_bgcolor="#f8f9fa",
+    )
+    return fig
+
+
+def fig_mesa_espectro(puesto: str, mesa: int):
+    """Barra de espectro político para una mesa específica."""
+    df = votos_sm[(votos_sm["PUESNOMBRE"] == puesto) & (votos_sm["MESA"] == mesa)].copy()
+    if df.empty:
+        return go.Figure()
+    df_esp = df.groupby("ESPECTRO", as_index=False).agg(votos=("VOTOS", "sum"))
+    total  = df_esp["votos"].sum()
+    df_esp["pct"] = (df_esp["votos"] / total * 100).round(1)
+    order_map  = {e: i for i, e in enumerate(ORDEN_ESPECTRO)}
+    df_esp["order"] = df_esp["ESPECTRO"].map(order_map).fillna(99)
+    df_esp = df_esp.sort_values("order")
+    colores = [PALETA_ESPECTRO.get(e, "#9CA3AF") for e in df_esp["ESPECTRO"]]
+    fig = px.bar(
+        df_esp, x="ESPECTRO", y="votos",
+        color="ESPECTRO", color_discrete_sequence=colores,
+        text="pct",
+        labels={"ESPECTRO": "", "votos": "Votos"},
+    )
+    fig.update_traces(
+        texttemplate="%{text:.1f}%", textposition="outside", textfont=dict(size=10),
+    )
+    fig.update_layout(
+        showlegend=False, xaxis_tickangle=-20,
+        margin=dict(l=10, r=10, t=10, b=60), height=320,
+        plot_bgcolor="#f8f9fa", paper_bgcolor="#f8f9fa",
+    )
+    return fig
+
+
+def _mesa_kpis(puesto: str, mesa: int) -> dict:
+    df = votos_sm[(votos_sm["PUESNOMBRE"] == puesto) & (votos_sm["MESA"] == mesa)]
+    if df.empty:
+        return {"total": 0, "ganador": "—", "pct": 0.0}
+    total       = int(df["VOTOS"].sum())
+    winner_idx  = df["VOTOS"].idxmax()
+    winner_name = df.loc[winner_idx, "CANNOMBRE"].title()
+    winner_pct  = round(df.loc[winner_idx, "VOTOS"] / total * 100, 1) if total else 0.0
+    return {"total": total, "ganador": winner_name, "pct": winner_pct}
+
+
+# ---------------------------------------------------------------------------
+# KPI card helper
+# ---------------------------------------------------------------------------
+
 def kpi_card(titulo, valor, subtitulo="", color="primary"):
     return dbc.Card(
         dbc.CardBody([
@@ -1360,6 +1614,101 @@ tab_mapa = dbc.Container([
 ], fluid=True)
 
 
+# ---- Tab Por mesa ----
+tab_mesa = dbc.Container([
+    dbc.Row([
+        dbc.Col([
+            dbc.Label("Mesa de votación:", style={"fontWeight": "bold", "fontSize": "0.9rem"}),
+            dcc.Dropdown(
+                id="drop-mesa",
+                options=_OPCIONES_MESA,
+                value=_DEFAULT_MESA,
+                clearable=False,
+                searchable=True,
+                placeholder="Busca por colegio o mesa...",
+                style={"fontSize": "0.85rem"},
+            ),
+        ], width=6),
+        dbc.Col([
+            dbc.Row([
+                dbc.Col(dbc.Card(dbc.CardBody([
+                    html.P("Total votos", className="text-muted mb-1",
+                           style={"fontSize": "0.75rem"}),
+                    html.H5(id="kpi-mesa-total",
+                            className="mb-0 text-primary fw-bold"),
+                ]), className="shadow-sm"), width=4),
+                dbc.Col(dbc.Card(dbc.CardBody([
+                    html.P("Candidato ganador", className="text-muted mb-1",
+                           style={"fontSize": "0.75rem"}),
+                    html.H6(id="kpi-mesa-ganador",
+                            className="mb-0 fw-bold", style={"fontSize": "0.85rem"}),
+                ]), className="shadow-sm"), width=5),
+                dbc.Col(dbc.Card(dbc.CardBody([
+                    html.P("% ganador", className="text-muted mb-1",
+                           style={"fontSize": "0.75rem"}),
+                    html.H5(id="kpi-mesa-pct",
+                            className="mb-0 text-success fw-bold"),
+                ]), className="shadow-sm"), width=3),
+            ], className="g-2"),
+        ], width=6),
+    ], className="mt-2 mb-2 align-items-end"),
+    # Fila 2: resumen del puesto (todas las mesas) + mapa H3 con borde
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader(html.Span([
+                    "Distribución del puesto",
+                    html.Small(" · suma de todas las mesas", className="text-muted ms-2"),
+                ])),
+                dbc.CardBody(dcc.Graph(id="graf-mesa-resumen")),
+            ]),
+        ], width=5),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader([
+                    html.Span("Mapa H3 — % votos por zona"),
+                    html.Span([
+                        dbc.Label("Candidato:", className="me-2 mb-0",
+                                  style={"fontSize": "0.78rem", "fontWeight": "bold"}),
+                        dcc.Dropdown(
+                            id="drop-mesa-cand-h3",
+                            options=(
+                                [
+                                    {"label": n.split()[0].title(), "value": n}
+                                    for n in CANDIDATOS_VALIDOS
+                                    if n != "VOTOS EN BLANCO"
+                                ]
+                                + [{"label": "Votos en Blanco", "value": "VOTOS EN BLANCO"}]
+                                + [{"label": "Abstención",      "value": "_abstencion_"}]
+                            ),
+                            value=TOP5[0] if TOP5 else None,
+                            clearable=False,
+                            style={"fontSize": "0.8rem", "minWidth": "160px"},
+                        ),
+                    ], className="float-end d-flex align-items-center gap-2"),
+                ]),
+                dbc.CardBody(dcc.Graph(id="graf-mesa-fullh3")),
+            ]),
+        ], width=7),
+    ], className="mt-0"),
+    # Fila 3: candidatos y espectro de la mesa específica
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Votos por candidato — esta mesa"),
+                dbc.CardBody(dcc.Graph(id="graf-mesa-cands")),
+            ]),
+        ], width=6),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Espectro político — esta mesa"),
+                dbc.CardBody(dcc.Graph(id="graf-mesa-espectro")),
+            ]),
+        ], width=6),
+    ], className="mt-2 mb-3"),
+], fluid=True)
+
+
 # ---- Tab Espectro ----
 _OPCIONES_ESPECTRO = [{"label": e, "value": e} for e in ORDEN_ESPECTRO] + [
     {"label": "Abstención", "value": "Abstención"}
@@ -1398,7 +1747,7 @@ tab_espectro = dbc.Container([
             ),
         ], width=12),
     ], className="mt-3 mb-1"),
-    # Fila 3 — mapa puestos + H3 hexágonos + coroplético Magdalena
+    # Fila 3 — mapa puestos + H3 hexágonos
     dbc.Row([
         dbc.Col([
             dbc.Card([
@@ -1408,7 +1757,7 @@ tab_espectro = dbc.Container([
                 ])),
                 dbc.CardBody(dcc.Graph(id="graf-espectro-mapa")),
             ]),
-        ], width=4),
+        ], width=6),
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader(html.Span([
@@ -1417,16 +1766,7 @@ tab_espectro = dbc.Container([
                 ])),
                 dbc.CardBody(dcc.Graph(id="graf-espectro-h3")),
             ]),
-        ], width=4),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader(html.Span([
-                    "Municipios del Magdalena",
-                    html.Small(" · % del espectro (solo SM tiene datos)", className="text-muted ms-2"),
-                ])),
-                dbc.CardBody(dcc.Graph(id="graf-espectro-choropleth")),
-            ]),
-        ], width=4),
+        ], width=6),
     ]),
     # Fila 4 — tabla
     dbc.Row([
@@ -1492,6 +1832,8 @@ app.layout = dbc.Container([
                 selected_style={"fontWeight": "bold", "color": "#1d6fa4"}),
         dcc.Tab(label="Espectro",    value="tab-espectro",
                 selected_style={"fontWeight": "bold", "color": "#1d6fa4"}),
+        dcc.Tab(label="Por mesa",    value="tab-mesa",
+                selected_style={"fontWeight": "bold", "color": "#1d6fa4"}),
         dcc.Tab(label="Mapa",        value="tab-mapa",
                 selected_style={"fontWeight": "bold", "color": "#1d6fa4"}),
     ]),
@@ -1510,6 +1852,7 @@ def render_tab(tab):
     if tab == "tab-sm":          return tab_sm
     if tab == "tab-candidatos":  return tab_candidatos
     if tab == "tab-espectro":    return tab_espectro
+    if tab == "tab-mesa":        return tab_mesa
     if tab == "tab-mapa":        return tab_mapa
 
 
@@ -1611,17 +1954,40 @@ def export_csv(_):
 
 # ---------------------------------------------------------------------------
 @app.callback(
-    Output("graf-espectro-mapa",       "figure"),
-    Output("graf-espectro-h3",         "figure"),
-    Output("graf-espectro-choropleth", "figure"),
+    Output("graf-espectro-mapa", "figure"),
+    Output("graf-espectro-h3",   "figure"),
     Input("radio-espectro", "value"),
 )
 def update_espectro_mapa(espectro):
-    choro_col = _ESPECTRO_TO_CHORO_COL.get(espectro, "esp_Izquierda")
+    return fig_espectro_mapa(espectro), fig_h3_espectro(espectro)
+
+
+@app.callback(
+    Output("graf-mesa-resumen",  "figure"),
+    Output("graf-mesa-fullh3",   "figure"),
+    Output("graf-mesa-cands",    "figure"),
+    Output("graf-mesa-espectro", "figure"),
+    Output("kpi-mesa-total",     "children"),
+    Output("kpi-mesa-ganador",   "children"),
+    Output("kpi-mesa-pct",       "children"),
+    Input("drop-mesa", "value"),
+    Input("drop-mesa-cand-h3", "value"),
+)
+def update_mesa(mesa_key, cand_h3):
+    if not mesa_key:
+        empty = go.Figure()
+        return empty, empty, empty, empty, "—", "—", "—"
+    puesto, mesa = _parse_mesa_key(mesa_key)
+    k = _mesa_kpis(puesto, mesa)
+    _cand = cand_h3 or (TOP5[0] if TOP5 else CANDIDATOS_VALIDOS[0])
     return (
-        fig_espectro_mapa(espectro),
-        fig_h3_espectro(espectro),
-        fig_magdalena_choropleth(choro_col),
+        fig_puesto_resumen(puesto),
+        fig_mesa_full_h3(puesto, _cand),
+        fig_mesa_cands(puesto, mesa),
+        fig_mesa_espectro(puesto, mesa),
+        f"{k['total']:,}",
+        k["ganador"],
+        f"{k['pct']:.1f}%",
     )
 
 

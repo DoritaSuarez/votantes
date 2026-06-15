@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py pipeline.py ./
 COPY data/ ./data/
+COPY assets/ ./assets/
 
 EXPOSE 8050
 

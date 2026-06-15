@@ -241,13 +241,25 @@ def build_data():
     ganador = ganador.merge(total_p, on=["COMUCODIGO", "PUESTO"])
     ganador["pct_ganador"] = (ganador["votos_cand"] / ganador["total_votos"] * 100).round(1)
 
-    # Geo join por nombre normalizado
+    # Geo join: primario por PUES_NORM, fallback por PUESTO numérico
     ganador["PUES_NORM"] = ganador["PUESNOMBRE"].apply(_norm_nombre)
+    # geo_lookup solo lleva PUES_NORM + coords (sin PUESTO para no colisionar con DataFrames que ya lo tienen)
     geo_lookup = (
         sm_zp[["PUES_NORM", "longitud", "latitud"]]
         .drop_duplicates("PUES_NORM")
     )
+    # Lookup alternativo por código PUESTO (numérico) para puestos sin match de nombre
+    _geo_by_puesto = (
+        sm_zp.dropna(subset=["latitud", "longitud"])[["PUESTO", "longitud", "latitud"]]
+        .drop_duplicates("PUESTO")
+    )
+
     ganador = ganador.merge(geo_lookup, on="PUES_NORM", how="left")
+    _miss_g = ganador["latitud"].isna()
+    if _miss_g.any():
+        _filled = ganador.loc[_miss_g, ["PUESTO"]].merge(_geo_by_puesto, on="PUESTO", how="left")
+        ganador.loc[_miss_g, "longitud"] = _filled["longitud"].values
+        ganador.loc[_miss_g, "latitud"]  = _filled["latitud"].values
 
     # ------------------------------------------------------------------
     # 7b. Votos por puesto por candidato con geo (para mapa filtrado)
@@ -255,6 +267,11 @@ def build_data():
     votos_geo = votos[~votos["CANNOMBRE"].isin({"VOTOS NULOS", "VOTOS NO MARCADOS"})].copy()
     votos_geo["PUES_NORM"] = votos_geo["PUESNOMBRE"].apply(_norm_nombre)
     votos_geo = votos_geo.merge(geo_lookup, on="PUES_NORM", how="left")
+    _miss_v = votos_geo["latitud"].isna()
+    if _miss_v.any():
+        _filled = votos_geo.loc[_miss_v, ["PUESTO"]].merge(_geo_by_puesto, on="PUESTO", how="left")
+        votos_geo.loc[_miss_v, "longitud"] = _filled["longitud"].values
+        votos_geo.loc[_miss_v, "latitud"]  = _filled["latitud"].values
 
     # Total votos válidos por puesto (denominador para el %)
     total_validos_puesto = (
@@ -368,6 +385,11 @@ def build_data():
     votos_esp_geo = votos_esp.copy()
     votos_esp_geo["PUES_NORM"] = votos_esp_geo["PUESNOMBRE"].apply(_norm_nombre)
     votos_esp_geo = votos_esp_geo.merge(geo_lookup, on="PUES_NORM", how="left")
+    _miss_e = votos_esp_geo["latitud"].isna()
+    if _miss_e.any():
+        _filled = votos_esp_geo.loc[_miss_e, ["PUESTO"]].merge(_geo_by_puesto, on="PUESTO", how="left")
+        votos_esp_geo.loc[_miss_e, "longitud"] = _filled["longitud"].values
+        votos_esp_geo.loc[_miss_e, "latitud"]  = _filled["latitud"].values
     total_valid_puesto = (
         votos_esp_geo.groupby(["COMUCODIGO", "PUESTO"])["VOTOS"].sum()
         .reset_index(name="total_puesto")
@@ -432,55 +454,47 @@ def build_data():
     mun["GEO_NAME2"] = mun["MUNNOMBRE"].apply(_find_geo_name2)
 
     # ------------------------------------------------------------------
-    # 12. Grilla hexagonal H3 — candidato ganador por zona
-    #     Cada hexágono se asigna al puesto más cercano (KNN).
-    #     Solo hexágonos dentro del polígono de Santa Marta (sin mar ni sierra).
-    #     Requiere: pip install h3
+    # 12. Grilla hexagonal H3 — Voronoi puro sobre Santa Marta
+    #     Se llena el polígono completo de SM con celdas H3, luego cada
+    #     celda se asigna al puesto de votación más cercano (KDTree).
+    #     Así se obtiene una teselación de Voronoi real sin huecos.
     # ------------------------------------------------------------------
     voronoi_geo = None
     voronoi_df  = pd.DataFrame()
     try:
         import h3
         from scipy.spatial import KDTree
-        from shapely.geometry import shape as _shape, mapping as _mapping
 
-        _RES    = 9    # ~175 m de lado por hexágono (nivel de barrio)
-        _RADIUS = 6    # hexágonos de radio alrededor de cada puesto
+        _RES = 9    # ~175 m de lado por hexágono
 
         _gv = ganador.dropna(subset=["longitud", "latitud"]).reset_index(drop=True).copy()
 
-        # Polígono de SM para excluir océano y sierra remota
         _sm_feat = next(
             (f for f in mun_geojson["features"]
              if f["properties"].get("NAME_2") == "Santa Marta"),
             None,
         )
-        _sm_poly = _shape(_sm_feat["geometry"]) if _sm_feat else None
+        if _sm_feat is None:
+            raise ValueError("No se encontró Santa Marta en el GeoJSON")
 
-        # Recolectar todos los hexágonos dentro del radio de cualquier puesto
-        _all_hexes: set[str] = set()
-        for _, _r in _gv.iterrows():
-            _center = h3.latlng_to_cell(_r.latitud, _r.longitud, _RES)
-            _all_hexes.update(h3.grid_disk(_center, _RADIUS))
+        # Llenar el polígono completo de SM con celdas H3
+        # h3.geo_to_cells acepta directamente la geometría GeoJSON
+        _all_hexes = h3.geo_to_cells(_sm_feat["geometry"], _RES)
+        print(f"[h3] {len(_all_hexes)} celdas en polígono SM (res={_RES})")
 
-        # KDTree sobre coordenadas de puestos para búsqueda del más cercano
+        # KDTree sobre coordenadas de puestos
         _kd = KDTree(list(zip(_gv["latitud"], _gv["longitud"])))
 
         _features = []
         for _i, _hx in enumerate(sorted(_all_hexes)):
             _hlat, _hlon = h3.cell_to_latlng(_hx)
 
-            # Excluir hexágonos fuera de Santa Marta (mar, otra jurisdicción)
-            if _sm_poly and not _sm_poly.contains(
-                __import__("shapely.geometry", fromlist=["Point"]).Point(_hlon, _hlat)
-            ):
-                continue
-
+            # Puesto más cercano
             _, _idx = _kd.query([_hlat, _hlon])
             _row = _gv.iloc[_idx]
 
-            # GeoJSON polygon del hexágono (h3 devuelve (lat,lon), GeoJSON pide (lon,lat))
-            _bnd = h3.cell_to_boundary(_hx)
+            # Polígono GeoJSON del hexágono (h3 → (lat,lon), GeoJSON → (lon,lat))
+            _bnd  = h3.cell_to_boundary(_hx)
             _ring = [[_lon, _lat] for _lat, _lon in _bnd] + [[_bnd[0][1], _bnd[0][0]]]
 
             _features.append({
@@ -498,7 +512,7 @@ def build_data():
 
         voronoi_geo = {"type": "FeatureCollection", "features": _features}
         voronoi_df  = pd.DataFrame([f["properties"] for f in _features])
-        print(f"[h3] {len(_features)} hexágonos (res={_RES}, radio={_RADIUS})")
+        print(f"[h3] {len(_features)} hexágonos Voronoi generados (res={_RES})")
 
     except ImportError:
         print("[h3] No instalado — ejecuta: pip install h3")
