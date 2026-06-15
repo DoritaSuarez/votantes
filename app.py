@@ -81,7 +81,124 @@ COLOR_BLANCO   = "#E63946"
 COLOR_POSITIVO = "#2A9D8F"
 
 # ---------------------------------------------------------------------------
-# Figuras — Tab Magdalena
+# Figuras — Tab Magdalena (nuevas: candidatos, segunda vuelta, stacked)
+# ---------------------------------------------------------------------------
+
+_SEGUNDA_VUELTA = ["IVÁN CEPEDA CASTRO", "ABELARDO DE LA ESPRIELLA"]
+_SM_COMUS = None  # inicializado más abajo tras cargar datos
+
+
+def fig_cands_magdalena():
+    """Columnas: votos totales por candidato en Magdalena + % sobre el total válido."""
+    df = cand[~cand["CANNOMBRE"].isin({"VOTOS NULOS", "VOTOS NO MARCADOS"})].copy()
+    total = df["votos"].sum()
+    df["pct"] = (df["votos"] / total * 100).round(1)
+    df = df.sort_values("votos", ascending=False)
+    colores = [_color(n) for n in df["CANNOMBRE"]]
+
+    fig = px.bar(
+        df, x="CANNOMBRE", y="votos",
+        color="CANNOMBRE", color_discrete_sequence=colores,
+        text="pct",
+        labels={"CANNOMBRE": "", "votos": "Votos", "pct": "% del total"},
+        custom_data=["pct"],
+    )
+    fig.update_traces(
+        texttemplate="%{customdata[0]:.1f}%",
+        textposition="outside",
+        textfont=dict(size=11),
+        hovertemplate="<b>%{x}</b><br>Votos: %{y:,}<br>%{customdata[0]:.1f}% del total<extra></extra>",
+    )
+    fig.update_layout(
+        showlegend=False,
+        xaxis_tickangle=-35,
+        margin=dict(l=10, r=10, t=30, b=130),
+        height=400,
+        yaxis_title="Votos",
+        plot_bgcolor="#f8f9fa", paper_bgcolor="#f8f9fa",
+    )
+    return fig
+
+
+def fig_segunda_vuelta():
+    """Dos barras: solo candidatos de segunda vuelta con votos absolutos y %."""
+    total = cand[~cand["CANNOMBRE"].isin({"VOTOS NULOS", "VOTOS NO MARCADOS"})]["votos"].sum()
+    df = cand[cand["CANNOMBRE"].isin(_SEGUNDA_VUELTA)].copy()
+    df["pct"] = (df["votos"] / total * 100).round(1)
+    df = df.sort_values("votos", ascending=False)
+
+    fig = go.Figure()
+    for _, row in df.iterrows():
+        corto = row["CANNOMBRE"].split()[0].title()
+        fig.add_trace(go.Bar(
+            name=corto,
+            x=[corto],
+            y=[row["votos"]],
+            marker_color=_color(row["CANNOMBRE"]),
+            text=[f"{row['votos']:,}<br>{row['pct']:.1f}%"],
+            textposition="outside",
+            textfont=dict(size=13, family="Arial Black"),
+            hovertemplate=f"<b>{row['CANNOMBRE']}</b><br>Votos: {row['votos']:,}<br>{row['pct']:.1f}%<extra></extra>",
+        ))
+    fig.update_layout(
+        showlegend=False,
+        margin=dict(l=10, r=10, t=30, b=10),
+        height=360,
+        yaxis_title="Votos",
+        plot_bgcolor="#f8f9fa", paper_bgcolor="#f8f9fa",
+    )
+    return fig
+
+
+def fig_cand_vs_resto(candidato: str):
+    """Stacked horizontal: candidato | otros válidos | abstención+blanco — por comuna SM."""
+    sm_comus = sorted(abstenc_por_comu["COMUCODIGO"].unique())
+    cpc = cand_por_comuna[cand_por_comuna["COMUCODIGO"].isin(sm_comus)].copy()
+
+    v_cand   = cpc[cpc["CAT"] == candidato].set_index("COMUCODIGO")["votos"].reindex(sm_comus, fill_value=0)
+    v_blanco = blanco_zona.set_index("COMUCODIGO")["votos_blanco"].reindex(sm_comus, fill_value=0)
+    v_total  = cpc.groupby("COMUCODIGO")["votos"].sum().reindex(sm_comus, fill_value=0)
+    v_abstenc = abstenc_por_comu.set_index("COMUCODIGO")["abstenc"].reindex(sm_comus, fill_value=0)
+
+    v_otros    = (v_total - v_cand - v_blanco).clip(lower=0).astype(int)
+    v_absblanco = (v_abstenc.fillna(0) + v_blanco.fillna(0)).astype(int)
+
+    idx_ord   = v_cand.sort_values().index
+    comunas   = [f"Comuna {c}" for c in idx_ord]
+    color_hex = _color(candidato)
+    corto     = candidato.split()[0].title()
+
+    fig = go.Figure()
+    for vals, label, color in [
+        (v_cand[idx_ord].astype(int),     corto,                   color_hex),
+        (v_otros[idx_ord],                "Otros candidatos",      "#94A3B8"),
+        (v_absblanco[idx_ord],            "Abstención + Blanco",   "#C0398A"),
+    ]:
+        vlist = vals.tolist()
+        fig.add_trace(go.Bar(
+            name=label,
+            y=comunas, x=vlist,
+            orientation="h",
+            marker_color=color,
+            text=[f"{v:,}" if v > 0 else "" for v in vlist],
+            textposition="inside", insidetextanchor="middle",
+            textfont=dict(size=11, color="white", family="Arial Black"),
+            hovertemplate=f"<b>%{{y}}</b><br>{label}: %{{x:,}}<extra></extra>",
+        ))
+    fig.update_layout(
+        barmode="stack",
+        xaxis_title="Votos",
+        yaxis_title="",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11)),
+        margin=dict(l=10, r=10, t=50, b=10),
+        height=320,
+        plot_bgcolor="#f8f9fa", paper_bgcolor="#f8f9fa",
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figuras — Tab Magdalena (existentes)
 # ---------------------------------------------------------------------------
 
 def fig_mun_bar(top_n: int = 20):
@@ -944,7 +1061,47 @@ def kpi_card(titulo, valor, subtitulo="", color="primary"):
 # ---------------------------------------------------------------------------
 
 # ---- Tab 1: Magdalena ----
+_CANDS_DROPDOWN_MAG = [{"label": n.title(), "value": n} for n in TOP5]
+
 tab_magdalena = dbc.Container([
+    # ── Fila A: todos los candidatos + segunda vuelta ──────────────────────
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Votos por candidato — Magdalena · % sobre el total válido"),
+                dbc.CardBody(dcc.Graph(figure=fig_cands_magdalena())),
+            ]),
+        ], width=8),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader("Segunda vuelta · Cepeda vs De la Espriella"),
+                dbc.CardBody(dcc.Graph(figure=fig_segunda_vuelta())),
+            ]),
+        ], width=4),
+    ], className="mt-2"),
+    # ── Fila B: stacked por candidato ──────────────────────────────────────
+    dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader([
+                    html.Span("Candidato vs resto — por comuna Santa Marta"),
+                    html.Span([
+                        dbc.Label("Candidato:", className="me-2 mb-0",
+                                  style={"fontSize": "0.82rem", "fontWeight": "bold"}),
+                        dcc.Dropdown(
+                            id="drop-cand-vs-resto",
+                            options=_CANDS_DROPDOWN_MAG,
+                            value=TOP5[0] if TOP5 else None,
+                            clearable=False,
+                            style={"fontSize": "0.82rem", "width": "320px", "display": "inline-block"},
+                        ),
+                    ], className="float-end d-flex align-items-center gap-2"),
+                ]),
+                dbc.CardBody(dcc.Graph(id="graf-cand-vs-resto")),
+            ]),
+        ], width=12),
+    ], className="mt-2"),
+    # ── Fila C (existente): sufragantes + tabla + coroplético ───────────────
     dbc.Row([
         dbc.Col(html.H5("Sufragantes por municipio — Magdalena", className="text-muted mt-2"), width=7),
         dbc.Col([
@@ -962,7 +1119,7 @@ tab_magdalena = dbc.Container([
                 style={"fontSize": "0.82rem"},
             ),
         ], width=2),
-    ], className="mb-2"),
+    ], className="mb-2 mt-3"),
     dbc.Row([
         dbc.Col(dcc.Graph(id="graf-mun"), width=5),
         dbc.Col([
@@ -1359,6 +1516,16 @@ def render_tab(tab):
 @app.callback(Output("graf-mun", "figure"), Input("slider-topn", "value"))
 def update_mun_bar(top_n):
     return fig_mun_bar(top_n)
+
+
+@app.callback(
+    Output("graf-cand-vs-resto", "figure"),
+    Input("drop-cand-vs-resto", "value"),
+)
+def update_cand_vs_resto(candidato):
+    if not candidato:
+        return go.Figure()
+    return fig_cand_vs_resto(candidato)
 
 
 @app.callback(
